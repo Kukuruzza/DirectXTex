@@ -64,6 +64,7 @@ enum COMMANDS
     CMD_MERGE,
     CMD_GIF,
     CMD_ARRAY_STRIP,
+    CMD_MIP_STRIP,
     CMD_MAX
 };
 
@@ -122,6 +123,7 @@ const SValue g_pCommands[] =
     { L"merge",         CMD_MERGE },
     { L"gif",           CMD_GIF },
     { L"array-strip",   CMD_ARRAY_STRIP },
+    { L"mip-strip",     CMD_MIP_STRIP },
     { nullptr,          0 }
 };
 
@@ -948,6 +950,8 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     }
 
     DWORD dwCommand = LookupByName(argv[1], g_pCommands);
+    
+    #pragma region check has command
     switch (dwCommand)
     {
     case CMD_CUBE:
@@ -961,16 +965,19 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     case CMD_MERGE:
     case CMD_GIF:
     case CMD_ARRAY_STRIP:
+    case CMD_MIP_STRIP:
         break;
 
     default:
         wprintf(L"Must use one of: cube, volume, array, cubearray,\n   h-cross, v-cross, h-strip, v-strip, array-strip\n   merge, gif\n\n");
         return 1;
     }
+    #pragma endregion 
 
     DWORD dwOptions = 0;
     std::list<SConversion> conversion;
 
+    #pragma region Parse args
     for (int iArg = 2; iArg < argc; iArg++)
     {
         PWSTR pArg = argv[iArg];
@@ -1202,6 +1209,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
             conversion.push_back(conv);
         }
     }
+    #pragma endregion 
 
     if (conversion.empty())
     {
@@ -1212,6 +1220,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     if (~dwOptions & (1 << OPT_NOLOGO))
         PrintLogo();
 
+    #pragma region Check input file count
     switch (dwCommand)
     {
     case CMD_H_CROSS:
@@ -1220,6 +1229,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     case CMD_V_STRIP:
     case CMD_GIF:
     case CMD_ARRAY_STRIP:
+    case CMD_MIP_STRIP:
         if (conversion.size() > 1)
         {
             wprintf(L"ERROR: cross/strip/gif output only accepts 1 input file\n");
@@ -1238,6 +1248,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     default:
         break;
     }
+    #pragma endregion 
 
     // Convert images
     size_t images = 0;
@@ -1285,6 +1296,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                 case CMD_H_STRIP:
                 case CMD_V_STRIP:
                 case CMD_ARRAY_STRIP:
+                case CMD_MIP_STRIP:
                     _wmakepath_s(szOutputFile, nullptr, nullptr, fname, L".bmp");
                     break;
 
@@ -1365,7 +1377,70 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                     return 1;
                 }
                 break;
+            case CMD_MIP_STRIP:
+                if (_wcsicmp(ext, L".dds") != 0)
+                {
+                    wprintf(L"\nERROR: Only DDS images can be mip stripped" );
+                    return 1;
+                }
+                hr = LoadFromDDSFile(pConv->szSrc, DDS_FLAGS_NONE, &info, *image);
+                {
+                    if (FAILED(hr))
+                    {
+                        wprintf(L"FAILED (%x)\n", static_cast<unsigned int>(hr));
+                        return 1;
+                    }
+                    if (info.mipLevels <= 1)
+                    {
+                        wprintf(L"\bERROR: image has only 1 mip level");
+                        return 1;
+                    }
+                    if((info.width&1) || (info.height&1))
+                    {
+                        wprintf(L"\bERROR: image has odd dimensions");
+                        return 1;
+                    }
+                    ScratchImage output;
+                    --info.mipLevels;
+                    info.width >>= 1;
+                    info.height >>= 1;
+                    output.Initialize(info);
+                    size_t depth = info.depth;
+                    for(size_t i = 0; i < info.mipLevels; ++i)
+                    {
+                        if (depth > 1)
+                            depth >>= 1;
 
+                        for(size_t j = 0; j < info.arraySize; ++j)
+                        {
+
+                            for (size_t k = 0; k < depth; ++k)
+                            {
+                                auto src = image->GetImage(i + 1, j, k);
+                                auto dst = output.GetImage(i, j, k);
+                                size_t rowPitch, slicePitch;
+                                hr = ComputePitch(info.format, src->width, src->height, rowPitch, slicePitch, 0);
+                                if(FAILED(hr))
+                                {
+                                    wprintf(L"FAILED to compute mip pitch(%x)\n", static_cast<unsigned int>(hr));
+                                    return 1;
+                                }
+
+                                memcpy(dst->pixels, src->pixels, slicePitch);
+                            }
+                        }
+                    }
+                    hr = SaveToDDSFile(output.GetImages(), output.GetImageCount(), output.GetMetadata(), 0, szOutputFile);
+                    if(FAILED(hr))
+                    {
+                        wprintf(L"FAILED saving files(%x)\n", static_cast<unsigned int>(hr));
+                        return 1;
+                    }
+
+                    return 0;
+                }
+
+                break;
             default:
                 if (_wcsicmp(ext, L".dds") == 0)
                 {
